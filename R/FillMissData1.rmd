@@ -11,7 +11,7 @@ output:
     toc: yes
 ---
 
-Some Notes for filling missing data in climatological time-series using R :cloud: :cyclone: :sunny:
+Some Notes for filling missing data in climatological time-series using R :cloud: :zap: :sunny:
 SEI R-users group 7-7-2016
 
 The Rmarkdown file and data used to generate this page is stored on [github](https://github.com/njdepsky/RSpatial_6-29)
