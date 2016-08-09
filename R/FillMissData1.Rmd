@@ -1,0 +1,244 @@
+---
+title: "Filling Missing Data in Climatological Time-Series"
+author: '  Manon von Kaenel & Nick Depsky  '
+date: '  July 7th 2016  '
+output:
+  html_document:
+    number_sections: no
+    theme: readable
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+Some Notes for filling missing data in climatological time-series using R 
+SEI R-users group 7-7-2016
+
+The Rmarkdown file and data used to generate this page is stored on [github](https://github.com/njdepsky/Climate-Data-Processing-for-WEAP-Applications)
+
+## Goals 
+Go over some common workflows relevant to handling missing data when dealing with climatological station time-series data (This example will use precipitation records from the Santa Clara Valley, CA). In particular...  
+
+* Importing Data and Calculating Distance between stations
+* Calculating Temporal Record Overlap and Correlation Coefficients between stations
+* Filling Missing Data Using the Correlation Coeffcient Weighting Method
+
+## Resources
+* Data used for the examples are hosted in this repository. The zipped file contains the following:
+    - `SCVWD_Daily_RainGage_ts.csv` : csv of the station precipitation data in Santa Clara County, CA
+    - `Station_XY_ft.csv`: csv of station Lon Lat Coordinates
+You can download/unzip the data by hand or run the following code to download and unzip the data to a temporary directory
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 100)
+```
+
+```{r eval = TRUE}
+setwd(tempdir())  # set working directory to temporary directory 
+
+download.file("https://github.com/njdepsky/Climate-Data-Processing-for-WEAP-Applications/raw/master/rawdata/fillmissdata.zip", destfile = 'fillmissdata.zip')
+
+unzip( 'fillmissdata.zip' , exdir = getwd())
+```
+
+# 0. Prerequisites
+Some date functions we will use come from the `zoo` package, so be sure to have it installed prior to attempting this exercise. You can download this package with the following command.
+
+```{r eval = TRUE}
+install.packages('zoo', repos = "http://cran.cnr.berkeley.edu/")
+library(zoo)
+```
+
+# 1. Get the data in
+Now will import the downloaded precipitation time-series
+
+## Loading CSV file of the Lon, Lat Coordinates of the rainfall stations (NAD 1983 CA III FIPS - ft)
+```{r eval = TRUE}
+Coord <- read.csv('fillmissdata\\Station_XY_ft.csv', check.names = F, stringsAsFactors = F)
+head(Coord)
+```
+that was easy!
+
+Note the 'check.names = F' parameter in the 'read.csv' function preserves the column headers from the original record table.
+
+## Importing the rainfall records, and specifying the Start and End Date for the Analysis
+```{r eval = TRUE}
+rain <- read.csv('fillmissdata\\SCVWD_Daily_RainGage_ts.csv', check.names = F, stringsAsFactors = F)
+rain$Date <- as.Date(rain$Date) 
+
+StartDate <- as.Date('1/1/1990', format = "%m/%d/%Y") # user-defined start date for period during which missing data will be filled
+
+EndDate <- as.Date('12/31/2010', format = "%m/%d/%Y") # user-defined end date
+
+rainfilt <- rain[which(rain$Date == StartDate):which(rain$Date == EndDate),] # filters records according to the start & end dates
+
+rainfilt <- rainfilt[,which(colSums(!is.na(rainfilt)) > 0)] # removes station columns that have no data for the specified time-period
+rainfilt[2492:2495,1:5] 
+```
+The above commands load the raw historical rainfall records for each stations and dictate the start and end dates for the period of analysis. These dates are something that the user needs to determine and input manually.  This period will represent the time period over which missing values in the original records will be analyzed and replaced.
+
+Displayed above are a few days of the historical rainfall records for 4 stations within the time-period specified, and where 1 of the 4 stations is missing data.
+
+## Organizing the Data and Preparing it for Analysis
+```{r eval = TRUE}
+numest <- length(rainfilt) - 1 # calculates number of rainfall stations in the imported record table
+
+rainmat <- as.matrix(rainfilt[,-1]) # converts records from data frame to matrix, excluding date values
+
+Rcd <- matrix(NA, nrow = length(rainfilt$Date), ncol = numest) # creates blank matrix for plotting non-NAs in period of record plot, will consist of binary 1/0 values indicating present/missing data
+
+colnames(Rcd) <- colnames(rainmat) # assigns the station names to the newly-created Rcd matrix
+
+RcdFill <- matrix(NA, nrow = length(rainfilt$Date), ncol = numest) # blank matrix for plotting non-NAs in period of record plot with missing data newly filled
+
+colnames(RcdFill) <- colnames(rainmat) # assigns the station names to the newly-created NewRcd matrix
+```
+If all of the objects created here don't quite make sense yet, that's OK, they will be put to use later. 
+
+## Specifying the Limits of Attributes Used in the Data-Filling Process 
+```{r eval = TRUE}
+Distlim <- 8*5280 # maximum distance (ft) apart between stations to consider using them to complete one another's data (currently set equal to 8 miles)
+
+OLlim <- 5*365 # minimum length of overlap period (days) between stations to consider using them to fill one another's missing data (currently set equal to 5 years)
+
+CClim <- 0.5 # minimum correlation coefficient (absolute value) between stations to consider using them to fill one another's missing data 
+```
+The method we will apply to fill missing data is called the Correlation Coefficient Weighting Method, or CCW. This method consists of calculating the correlation coefficients between the records of every stations with one another (within the time-period specified above), and then using these weighted product of these coefficients and their respective recorded rainfall values in order to produce an estimate of the missing data value for a given station at a given time step. 
+
+Therefore, you may want to limit which station data is used to fill a given stations data based on its distance, length of overlap of their historical records, and minimum Correlation Coefficient Values. These limits can be manually defined as shown above.
+
+NOTE: A detailed explanation of the CCW method can be found in Teegavarapu & Chandramouli's 2005 paper 'Improved weighting methods, deterministic and stochastic data-driven models for estimation
+of missing precipitation records' in the Journal of Hydrology (see page 5 for an explanation of the CCW method).  
+
+## Finding Distances between Stations
+```{r eval = TRUE}
+distmat <- matrix(NA, numest, numest) # blank matrix to contain the distances between stations
+
+colnames(distmat) <- colnames(rainfilt)[-1] # assigns column names to station names
+rownames(distmat) <- colnames(rainfilt)[-1] # assigns row names to stations names
+
+for (i in 1:numest)
+{
+  for (j in 1:numest)
+  {
+    distmat[i,j] <- sqrt((abs(Coord[j,4]) - abs(Coord[i,4]))^2 + (abs(Coord[j,4]) - abs(Coord[i,4]))^2) # distance formula calculating distance (ft) between stations
+  }
+} 
+distmat[1:4,1:4]
+```
+Now a matrix has been created that contains the distances between each station. These values for 4 stations are shown above.  Note that the matrix consists of a diagonal of 0 values, indicating that each station is "0 ft from itself", and the distances between other stations are mirrored across this diagonal.
+
+## Finding Length of Overlap of Data (non-missing values) between Stations
+```{r eval = TRUE}
+OL <- matrix(0, numest, numest) # creates empty matrix to be filled with values representing the number of days that each station pair have in common (OverLap)
+
+colnames(OL) <- colnames(rainfilt)[-1]
+rownames(OL) <- colnames(rainfilt)[-1] 
+
+for (a in 1:numest)
+{
+  for (b in 1:numest)
+  {
+    OL[a,b] <- length(which(!is.na(rainfilt[,a+1]) & !is.na(rainfilt[,b+1]))) # Overlap matrix values are equal to the length (days) in which the columns associated with stations a and b each have non-NA values 
+  }
+} 
+OL[1:4,1:4]
+```
+Now a matrix has been created that contains the length of overlapping records between each station. 
+
+## Calculating Correlation Coefficients between Stations
+```{r eval = TRUE}
+CC <- cor(rainmat, y = NULL, use = "pairwise.complete.obs") # calculates the correlation coefficient between all station pairs using pairwise complete observation which allows for NA values without removing them or including them in the calculation
+
+CC[CC == 1] <- NA # removes the identity correlations (stations with themselves) of 1 to exclude these from further consideration
+CC[1:4,1:4]
+```
+Now a matrix has been created that contains the correlation coefficients (CC) between each station. These CC values are based upon the correlation between all temporally-overlapping records between a given pair of stations.
+
+## Filtering CC Values Based Upon the Thresholds Defined for Acceptable Levels of Overlap, Distance, and CC Values themselves Between Stations
+```{r eval = TRUE}
+CCfilt <- CC # creates new object to contain filtered CC values
+
+CCfilt[abs(CCfilt) <= CClim] <- NA # removes all CC values below the defined minimum CC threshold
+
+CCfilt[OL <= OLlim] <- NA # removes all CC values for station-pairs which do not have a period of overlap at least as long as the thereshold specified
+
+CCfilt[distmat > Distlim] <- NA # removes all CC values for station-pairs which are further apart than specified threshold
+CCfilt[1:4,1:4]
+```
+Notice that after this filtering has occurred, there have been some CC values removed from the matrix in order to exclude them from consideration in the CCW missing data-filling method applied below.
+
+## Filling Missing Data Using the CCW Method
+```{r eval = TRUE}
+RainFill <- rainmat # creates a new rain matrix to contain filled missing data values
+
+for (f in 1:numest)
+{
+  valvec <- which(!is.na(CCfilt[f,]))
+  
+  if (length(valvec) > 0) # condition to apply the CCW method only to stations which have some available CC values from station pairs after the filtering by overlap, distance, and CC value done above
+  {
+    rainCC <- rainmat[,valvec] * matrix(rep(CCfilt[f,valvec],each=dim(rainmat)[1]),nrow=dim(rainmat)[1]) #column-wise multiplication by a vector to get the rain values of each station multiplied by the cor coeff between that station and the others
+    rainCCsum <- rowSums(rainCC, na.rm = T)
+    CCsum <- sum(CCfilt[f,valvec])
+    missing <- which(is.na(rainmat[,f]))
+    RainFill[missing,f] <- rainCCsum[missing]/CCsum
+    
+    Rcd[,f] <- !is.na(rainmat[,f]) # populates the record matrix with rain values from the original rain record matrix (rainfilt) 
+    RcdFill[,f] <- !is.na(RainFill[,f]) # populates a new filled-record matrix with rain values from the newly filled rain record matrix (RainFill)
+  } else {
+    RainFill[,f] <- rainmat[,f]
+    Rcd[,f] <- !is.na(rainmat[,f]) # populates the record matrix with rain values from the original rain record matrix (rainfilt) 
+    RcdFill[,f] <- !is.na(RainFill[,f]) # populates a new filled-record matrix with rain values from the newly filled rain record matrix (RainFill)
+  }
+
+}
+
+Rcd[rainmat == TRUE] <- 1 # converts original un-filled rain values to binary (1/0) logical (available/missing) values
+
+Rcd[Rcd == 0] <- NA # assigns NA to all missing data 
+
+RcdFill[RainFill == TRUE] <- 1 # converts newly filled rain values to binary (1/0) logical (available/missing) values
+
+RcdFill[RcdFill == 0] <- NA # assigns NA to all missing data 
+
+RainFill <- as.data.frame(RainFill) # converts the filled matrix back to a data frame object
+
+RainFill <- cbind(rainfilt$Date, RainFill) # re-combines the date values with the new data frame
+
+colnames(RainFill) <- c('Date', colnames(rainmat)) # re-assigns station names to this new data frame
+
+RainFill[2492:2495,1:5]
+```
+Notice that those missing values we saw before have now been filled? If some of the intermediate commands shown above are a bit confusing, it's that's OK. It's best to try and follow along in the journal article cited above while attempting to interpret the above code.
+
+The most important take away, however, is that now we have a data frame of the original rainfall values mixed in with filled-in missing data estimated using the CCW method. It's important to clarify, however, that not ALL missing values will be necessarily filled in as we'll see in the graphic below. This is because the CCW method is still limited by the data available and the thresholds placed on CC values, distance between stations, and length of record overlap. If a given station failed some of these criteria, it may be that there are no valid CC values remaining to be used in the CCW calculations to fill its missing data.
+
+## Plotting Period of Record Graph
+```{r eval = TRUE, fig.width = 10, fig.height = 8}
+par(mfrow=c(1,1))
+par(mar = c(3,max(nchar(colnames(rainmat)))/3.5,4,2), xpd = TRUE) # sets graph margins, accounting for length of the station names
+
+plot(rainfilt$Date, RcdFill[,1], lwd = "2",  col = 2, ylab = '', xlab = '', ylim = c(0, dim(RcdFill)[2]), yaxt = 'n', type = 'l', main = 'Period of Record - SCVWD Rain Gages') # plots base graph
+
+for (p in 2:dim(RcdFill)[2]) # adds all filled record lines in red
+{
+  lines(as.Date(StartDate:EndDate), p*RcdFill[,p], lwd = "2",  col = 2)
+}
+
+for (l in 1:dim(Rcd)[2]) # overlays original record lines in blue
+{
+  lines(as.Date(StartDate:EndDate), l*Rcd[,l], lwd = "2",  col = 4)
+}
+
+par(las = 1, cex.axis = 0.50) # sets the y labels to be horizontal
+axis(2, 1:dim(RcdFill)[2], labels = colnames(rainmat)) # places station names as the y-axis labels
+legend('top', legend = c("Filled Data", "Original Data"), bty = 'n', cex = 0.8, col = c('red', 'blue'), lty = c(1,1), text.col = "black", bg = "white", horiz = TRUE, merge = TRUE, lwd = 2, inset = c(0,-0.05)) # adds legend to the plot (below title)
+```
+
+We can see from the plot above that many periods of missing data have been filled (areas in red).  However, there remain a number of data gaps that were unable to be filled given the limiting criteria defined above and availability of existing historical data.  Note that most of the stations where data gaps remain unfilled are those which have very few years of original data during this period, and therefore do not meet the criteria defined above of at least 5 years of cumulative data overlap with other stations in order to carry the CCW estimation procedure to fill missing values. 
+
+## Writing the Newly Filled Record Table to CSV
+```{r eval = FALSE}
+write.table(RainFill, 'SCVWD_RainGage_Missing_Filled_1990_2010.csv', sep = ',', row.names = F)
+```
